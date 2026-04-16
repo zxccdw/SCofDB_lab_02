@@ -106,10 +106,14 @@ async def test_concurrent_payment_safe_prevents_race_condition(db_session, test_
     )
     
     success_count = sum(1 for r in results if not isinstance(r, Exception))
-    error_count = sum(1 for r in results if isinstance(r, Exception))
-    
+    errors = [r for r in results if isinstance(r, Exception)]
+
     assert success_count == 1, f"Ожидалась одна успешная оплата, получено: {success_count}"
-    assert error_count == 1, f"Ожидалась одна неудачная попытка, получено: {error_count}"
+    assert len(errors) == 1, f"Ожидалась одна неудачная попытка, получено: {len(errors)}"
+    assert isinstance(errors[0], OrderAlreadyPaidError), (
+        f"Проигравшая транзакция должна поднять OrderAlreadyPaidError, "
+        f"получено: {type(errors[0])}: {errors[0]}"
+    )
     
     async with async_session_maker() as check_session:
         service = PaymentService(check_session)

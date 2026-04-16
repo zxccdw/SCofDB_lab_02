@@ -127,16 +127,15 @@ class OrderRepository:
                 }
             )
         
-        await self.session.execute(
-            text("DELETE FROM order_status_history WHERE order_id = :order_id"),
-            {"order_id": order.id}
-        )
-        
+        # История статусов — append-only лог: не удаляем существующие записи,
+        # только добавляем новые. ON CONFLICT DO NOTHING защищает от дублей
+        # при повторном сохранении одного и того же объекта Order.
         for change in order.status_history:
             await self.session.execute(
                 text("""
                     INSERT INTO order_status_history (id, order_id, status, changed_at)
                     VALUES (:id, :order_id, :status, :changed_at)
+                    ON CONFLICT (id) DO NOTHING
                 """),
                 {
                     "id": change.id,

@@ -5,10 +5,12 @@
 2. pay_order_safe() - безопасная реализация (REPEATABLE READ + FOR UPDATE)
 """
 
+import asyncio
 import uuid
 from typing import Optional
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import OrderAlreadyPaidError, OrderNotFoundError
@@ -32,14 +34,18 @@ class PaymentService:
             {"order_id": order_id}
         )
         row = result.fetchone()
-        
+
         if not row:
             raise OrderNotFoundError(order_id)
-        
+
+        # Явная уступка event loop — делает окно гонки видимым для демонстрации.
+        # Именно здесь T2 успевает прочитать строку до того, как T1 её обновил.
+        await asyncio.sleep(0)
+
         await self.session.execute(
             text("""
-                UPDATE orders 
-                SET status = 'paid' 
+                UPDATE orders
+                SET status = 'paid'
                 WHERE id = :order_id
             """),
             {"order_id": order_id}
@@ -64,14 +70,27 @@ class PaymentService:
         Использует REPEATABLE READ + FOR UPDATE для предотвращения race condition.
         Корректно работает при конкурентных запросах.
         """
-        await self.session.execute(
-            text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        # Устанавливаем уровень изоляции до первого SQL-запроса в транзакции.
+        # connection() передаёт execution_options на уровень соединения,
+        # что эквивалентно BEGIN ISOLATION LEVEL REPEATABLE READ в PostgreSQL
+        # и корректно работает независимо от того, было ли уже начато BEGIN.
+        await self.session.connection(
+            execution_options={"isolation_level": "REPEATABLE READ"}
         )
 
-        result = await self.session.execute(
-            text("SELECT id, status FROM orders WHERE id = :order_id FOR UPDATE"),
-            {"order_id": order_id}
-        )
+        try:
+            result = await self.session.execute(
+                text("SELECT id, status FROM orders WHERE id = :order_id FOR UPDATE"),
+                {"order_id": order_id}
+            )
+        except DBAPIError as e:
+            # REPEATABLE READ поднимает SerializationError (pgcode 40001), когда
+            # конкурентная транзакция изменила строку до того, как мы взяли блокировку.
+            # Это означает, что заказ уже был оплачен другой транзакцией.
+            if "could not serialize" in str(e).lower():
+                raise OrderAlreadyPaidError(order_id) from e
+            raise
+
         row = result.fetchone()
 
         if not row:
